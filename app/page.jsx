@@ -7025,6 +7025,8 @@ export default function HomePage() {
       masked: maskAmounts,
       layoutMode: 'drawer',
       isHoldingLinked: !!row?.isHoldingLinked,
+      fundTags: row?.fundTags || [],
+      onFundTagsClick: openFundTagsEdit,
     };
   }, [
     todayStr,
@@ -7890,6 +7892,8 @@ export default function HomePage() {
                               onToggleTrendCollapse={toggleTrendCollapse}
                               onToggleEarningsCollapse={toggleEarningsCollapse}
                               masked={maskAmounts}
+                              fundTags={Array.isArray(fundTagListsByCode[f.code]) ? fundTagListsByCode[f.code] : []}
+                              onFundTagsClick={openFundTagsEdit}
                             />
                         </motion.div>
                       ))}
