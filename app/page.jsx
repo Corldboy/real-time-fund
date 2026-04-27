@@ -3724,18 +3724,13 @@ export default function HomePage() {
   // 实时同步
   useEffect(() => {
     if (!isSupabaseConfigured || !user?.id) return;
+    const deviceId = deviceIdRef.current;
+    if (!deviceId) return; // 确保设备ID已初始化
+    
     const channel = supabase
       .channel(`user-configs-${user.id}`)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'user_configs', filter: `user_id=eq.${user.id}` }, async (payload) => {
-        const incoming = payload?.new?.data;
-        if (!isPlainObject(incoming)) return;
-        const incomingDeviceId = incoming?._syncMeta?.deviceId ? String(incoming._syncMeta.deviceId) : '';
-        if (incomingDeviceId && deviceIdRef.current && incomingDeviceId === deviceIdRef.current) return;
-        const incomingComparable = getComparablePayload(incoming);
-        if (!incomingComparable || incomingComparable === lastSyncedRef.current) return;
-        await applyCloudConfig(incoming, payload.new.updated_at);
-      })
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'user_configs', filter: `user_id=eq.${user.id}` }, async (payload) => {
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'user_configs', filter: `last_device_id=neq.${deviceId}` }, async (payload) => {
+        if (payload.eventType !== 'INSERT' && payload.eventType !== 'UPDATE') return;
         const incoming = payload?.new?.data;
         if (!isPlainObject(incoming)) return;
         const incomingDeviceId = incoming?._syncMeta?.deviceId ? String(incoming._syncMeta.deviceId) : '';
@@ -5958,7 +5953,8 @@ export default function HomePage() {
       if (isPartial) {
         // 增量更新：使用 RPC 调用
         const { error: rpcError } = await supabase.rpc('update_user_config_partial', {
-          payload: dataToSync
+          payload: dataToSync,
+          p_last_device_id: deviceId
         });
 
         if (rpcError) {
@@ -5985,7 +5981,8 @@ export default function HomePage() {
             {
               user_id: userId,
               data: dataToSync,
-              updated_at: now
+              updated_at: now,
+              last_device_id: deviceId
             },
             { onConflict: 'user_id' }
           );
