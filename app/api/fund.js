@@ -390,30 +390,13 @@ export const fetchSmartFundNetValue = async (code, startDate) => {
   return null;
 };
 
-let allFundJsonCache = null;
-const fetchAllFundJson = async () => {
-  if (allFundJsonCache) return allFundJsonCache;
-  try {
-    const response = await fetch('/allFund.json');
-    if (!response.ok) return null;
-    const list = await response.json();
-    if (Array.isArray(list)) {
-      allFundJsonCache = new Map(list.map(f => [f.code, f.name]));
-      return allFundJsonCache;
-    }
-  } catch (e) {
-    console.warn('加载 allFund.json 失败', e);
-  }
-  return null;
-};
-
 export const fetchFundDataFallback = async (c) => {
   if (typeof window === 'undefined' || typeof document === 'undefined') {
     throw new Error('无浏览器环境');
   }
   return new Promise(async (resolve, reject) => {
     try {
-      // 尝试并行获取 F10 数据和本地全量基金列表
+      // 尝试并行获取 F10 数据和通过搜索接口获取基金名称
       const f10Promise = (async () => {
         const url = `https://fundf10.eastmoney.com/F10DataApi.aspx?type=lsjz&code=${c}&page=1&per=3&sdate=&edate=`;
         const apidata = await loadScript(url);
@@ -426,8 +409,14 @@ export const fetchFundDataFallback = async (c) => {
       })();
 
       const namePromise = (async () => {
-        const fundMap = await fetchAllFundJson();
-        return fundMap?.get(c) || null;
+        try {
+          // 通过搜索接口查询该代码对应的基金详情
+          const results = await searchFunds(c);
+          const found = results.find(item => item.CODE === c);
+          return found ? (found.NAME || found.SHORTNAME) : null;
+        } catch (e) {
+          return null;
+        }
       })();
 
       const [navResult, fundName] = await Promise.all([f10Promise, namePromise]);
@@ -908,36 +897,51 @@ export const fetchFundData = async (c) => {
 };
 
 export const searchFunds = async (val) => {
-  if (!val.trim()) return [];
+  const normalized = String(val || '').trim();
+  if (!normalized) return [];
   if (typeof window === 'undefined' || typeof document === 'undefined') return [];
-  const callbackName = `SuggestData_${Date.now()}`;
-  const url = `https://fundsuggest.eastmoney.com/FundSearch/api/FundSearchAPI.ashx?m=1&key=${encodeURIComponent(val)}&callback=${callbackName}&_=${Date.now()}`;
-  return new Promise((resolve, reject) => {
-    window[callbackName] = (data) => {
-      let results = [];
-      if (data && data.Datas) {
-        results = data.Datas.filter(d =>
-          d.CATEGORY === 700 ||
-          d.CATEGORY === '700' ||
-          d.CATEGORYDESC === '基金'
-        );
-      }
-      delete window[callbackName];
-      resolve(results);
-    };
-    const script = document.createElement('script');
-    script.src = url;
-    script.async = true;
-    script.onload = () => {
-      if (document.body.contains(script)) document.body.removeChild(script);
-    };
-    script.onerror = () => {
-      if (document.body.contains(script)) document.body.removeChild(script);
-      delete window[callbackName];
-      reject(new Error('搜索请求失败'));
-    };
-    document.body.appendChild(script);
-  });
+
+  const qc = getQueryClient();
+  try {
+    return await qc.fetchQuery({
+      queryKey: qk.fundSearch(normalized),
+      queryFn: async () => {
+        const callbackName = `SuggestData_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+        const url = `https://fundsuggest.eastmoney.com/FundSearch/api/FundSearchAPI.ashx?m=1&key=${encodeURIComponent(normalized)}&callback=${callbackName}&_=${Date.now()}`;
+
+        return new Promise((resolve, reject) => {
+          window[callbackName] = (data) => {
+            let results = [];
+            if (data && data.Datas) {
+              results = data.Datas.filter(d =>
+                d.CATEGORY === 700 ||
+                d.CATEGORY === '700' ||
+                d.CATEGORYDESC === '基金'
+              );
+            }
+            delete window[callbackName];
+            resolve(results);
+          };
+
+          const script = document.createElement('script');
+          script.src = url;
+          script.async = true;
+          script.onload = () => {
+            if (document.body.contains(script)) document.body.removeChild(script);
+          };
+          script.onerror = () => {
+            if (document.body.contains(script)) document.body.removeChild(script);
+            delete window[callbackName];
+            reject(new Error('搜索请求失败'));
+          };
+          document.body.appendChild(script);
+        });
+      },
+      staleTime: ONE_DAY_MS,
+    });
+  } catch (e) {
+    return [];
+  }
 };
 
 export const fetchShanghaiIndexDate = async () => {

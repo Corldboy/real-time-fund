@@ -2670,7 +2670,7 @@ export default function HomePage() {
         setLastSyncTime(e.newValue);
       }
       if (!keys.has(e.key)) return;
-      
+
       // 使用 storageStore 提供的签名函数进行精细判断
       import('./stores/storageStore').then(({ getFundCodesSignature, getTagsStoreSignature }) => {
         if (e.key === 'funds') {
@@ -3923,7 +3923,7 @@ export default function HomePage() {
 
   useEffect(() => {
     refreshCycleStartRef.current = Date.now();
-    
+
     const tick = () => {
       if (timerRef.current) clearTimeout(timerRef.current);
       timerRef.current = setTimeout(() => {
@@ -4059,12 +4059,13 @@ export default function HomePage() {
   };
 
   const refreshAll = async (codes) => {
+    // 【步骤 1】重入锁检查：防止多个刷新任务同时运行导致状态混乱
     if (refreshingRef.current) return;
     refreshingRef.current = true;
     setRefreshing(true);
-    const uniqueCodes = Array.from(new Set(codes));
 
-    // 1. 缓存当前存储中的基金代码，避免在循环中重复读取 localStorage
+    // 【步骤 2】参数归一化：去重并缓存当前本地存储中的基金代码，用于判断基金是否已被用户删除
+    const uniqueCodes = Array.from(new Set(codes));
     let cachedStoredFundCodes = new Set();
     try {
       const arr = storageStore.getItem('funds', []);
@@ -4082,9 +4083,10 @@ export default function HomePage() {
 
     try {
       const updated = [];
-      const dailyChanges = {}; // { [scope]: { [code]: nextList } }
+      const dailyChanges = {}; // 存储待更新的每日收益 { [scope]: { [code]: nextList } }
       let earningsChanged = false;
 
+      // ... 辅助函数定义 (isValidDateStr, addDays, calcEarningsFromNavs 等) ...
       const isValidDateStr = (s) => isString(s) && /^\d{4}-\d{2}-\d{2}$/.test(s);
       const addDays = (dateStr, days) => dayjs.tz(dateStr, TZ).add(days, 'day').format('YYYY-MM-DD');
       const subDays = (dateStr, days) => dayjs.tz(dateStr, TZ).subtract(days, 'day').format('YYYY-MM-DD');
@@ -4153,30 +4155,27 @@ export default function HomePage() {
 
       const localRecordToChanges = (scope, code, earnings, dateStr, rate) => {
         if (!dailyChanges[scope]) dailyChanges[scope] = {};
-        
-        // 优先从已有的变化中取，否则从当前 state (captured) 中取
-        const list = dailyChanges[scope][code] || 
+        const list = dailyChanges[scope][code] ||
                      (fundDailyEarnings[scope] && Array.isArray(fundDailyEarnings[scope][code]) ? fundDailyEarnings[scope][code] : []);
-        
         const existingIndex = list.findIndex(item => item.date === dateStr);
         const normalizedRate = isNumber(rate) && Number.isFinite(rate) ? rate : null;
         const nextList = existingIndex >= 0
           ? list.map((item, i) => i === existingIndex ? { date: dateStr, earnings, rate: normalizedRate } : item)
           : [...list, { date: dateStr, earnings, rate: normalizedRate }];
         nextList.sort((a, b) => a.date.localeCompare(b.date));
-        
         dailyChanges[scope][code] = nextList;
         earningsChanged = true;
       };
 
-      // 核心流水线优化：将抓取与收益计算合并到同一个异步池中
       const nextValuationSeries = { ...valuationSeries };
       let valuationChanged = false;
 
+      // 【步骤 3】核心流水线：使用 asyncPool 控制并发（同时抓取 5 个基金），平衡性能与浏览器限制
       await asyncPool(5, uniqueCodes, async (c) => {
         if (!fundCodeStillInStorage(c)) return;
         let data = null;
         try {
+          // 【步骤 3.1】数据获取：调用 api 获取实时估值、净值和持仓数据
           data = await fetchFundData(c);
         } catch (e) {
           console.error(`刷新基金 ${c} 失败`, e);
@@ -4191,20 +4190,20 @@ export default function HomePage() {
         if (!data || !fundCodeStillInStorage(c)) return;
         updated.push(data);
 
-        // 记录估值分时
+        // 【步骤 3.2】估值时序记录：提取实时估值点（gsz），用于绘制分时图
         if (data.code != null && !data.noValuation && Number.isFinite(Number(data.gsz))) {
           const value = Number(data.gsz);
           const gztime = data.gztime ?? null;
-          const dateStr = (isString(gztime) && /^\d{4}-\d{2}-\d{2}/.test(gztime)) 
-            ? gztime.slice(0, 10) 
+          const dateStr = (isString(gztime) && /^\d{4}-\d{2}-\d{2}/.test(gztime))
+            ? gztime.slice(0, 10)
             : dayjs().tz(TZ).format('YYYY-MM-DD');
-          const timeLabel = (isString(gztime) && gztime.length > 10) 
-            ? gztime.slice(11, 16) 
+          const timeLabel = (isString(gztime) && gztime.length > 10)
+            ? gztime.slice(11, 16)
             : dayjs().tz(TZ).format('HH:mm');
-          
+
           const list = Array.isArray(nextValuationSeries[data.code]) ? nextValuationSeries[data.code] : [];
           const lastDate = list.length ? list[list.length - 1].date : '';
-          
+
           if (dateStr > lastDate) {
             nextValuationSeries[data.code] = [{ time: timeLabel, value, date: dateStr }];
             valuationChanged = true;
@@ -4216,7 +4215,7 @@ export default function HomePage() {
           }
         }
 
-        // 补齐每日收益：遍历所有相关作用域（全局 + 所有包含此基金的分组）
+        // 【步骤 3.3】收益补齐逻辑：检查本地历史收益记录，如有缺失则根据持仓和历史净值进行追溯计算
         try {
           const targetScopes = [];
           if (holdings[data.code] && isNumber(holdings[data.code].share) && holdings[data.code].share > 0) {
@@ -4233,11 +4232,11 @@ export default function HomePage() {
           const latestNavDate = data.jzrq;
           if (!isValidDateStr(latestNavDate)) return;
 
-          const navCache = new Map(); // 同一基金的不同 scope 共享净值缓存
+          const navCache = new Map();
 
           for (const scope of targetScopes) {
             const h = scope === DAILY_EARNINGS_SCOPE_ALL ? holdings[data.code] : groupHoldings[scope][data.code];
-            const existing = dailyChanges[scope]?.[data.code] || 
+            const existing = dailyChanges[scope]?.[data.code] ||
                              (fundDailyEarnings[scope] && Array.isArray(fundDailyEarnings[scope][data.code]) ? fundDailyEarnings[scope][data.code] : []);
             const lastRecordedDate = existing.length ? existing[existing.length - 1]?.date : null;
 
@@ -4264,7 +4263,6 @@ export default function HomePage() {
                   localRecordToChanges(scope, data.code, v.earnings, latestNavDate, v.rate);
                 }
               }
-              // 兜底补齐
               if (!(dailyChanges[scope] && dailyChanges[scope][data.code])) {
                 try {
                   const nav = Number(data.dwjz);
@@ -4316,7 +4314,7 @@ export default function HomePage() {
         }
       });
 
-      // 统一状态更新，减少渲染次数
+      // 【步骤 4】UI 与存储同步：统一更新 React 状态和本地 localStorage，减少页面重绘
       if (updated.length > 0) {
         setFunds(prev => prev.map(f => updated.find(x => x.code === f.code) || f));
         if (valuationChanged) {
@@ -4327,19 +4325,16 @@ export default function HomePage() {
             });
             return next;
           });
-          // 虽然 setValuationSeries 是异步的，但 nextValuationSeries 包含全量更新，直接写入即可
           storageStore.setItem('fundValuationTimeseries', JSON.stringify(nextValuationSeries));
         }
       }
 
-      // 统一持久化收益数据 (使用函数式更新防止覆盖)
       if (earningsChanged) {
         setFundDailyEarnings(prev => {
           const next = { ...prev };
           for (const [scope, bucket] of Object.entries(dailyChanges)) {
             next[scope] = { ...next[scope], ...bucket };
           }
-          // 清理已删除的基金
           for (const code of uniqueCodes) {
             if (!cachedStoredFundCodes.has(code)) {
               Object.keys(next).forEach(s => {
@@ -4357,6 +4352,7 @@ export default function HomePage() {
     } catch (e) {
       console.error('刷新过程出错', e);
     } finally {
+      // 【步骤 5】后期调度：重置锁定状态，并根据用户设置的时间间隔启动下一次定时刷新
       refreshingRef.current = false;
       setRefreshing(false);
       refreshCycleStartRef.current = Date.now();
@@ -4365,6 +4361,8 @@ export default function HomePage() {
         const codes = refreshCodesRef.current || [];
         if (codes.length) refreshAll(codes);
       }, refreshMs);
+
+      // 【步骤 6】队列处理：执行可能积压的待处理交易（如到达触发价格的自动交易）
       try {
         await processPendingQueue();
       } catch (e) {
